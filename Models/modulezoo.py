@@ -47,7 +47,7 @@ class ModuleZoo:
                 d_model=d_model
             )
         
-        elif module_name == "sam166e":
+        elif module_name == "sam1" or module_name == "sam166e":
             return M53(
                 d_model=d_model,
                 clip_model_name = clip_module_name 
@@ -92,15 +92,14 @@ class ModuleZoo:
             dict: Dictionary mapping module names to their descriptions
         """
         modules = {
-            "sam1": "Enhanced SAM Prompt Generator with residual blocks and attention mechanisms",
-            "sam2": "Simplified SAM Prompt Generator with basic residual connections",
-            "sam_enhanced": "Alias for sam1 - Enhanced SAM Prompt Generator",
-            "sam_simple": "Alias for sam2 - Simplified SAM Prompt Generator",
-            "easybackbone": "Simple implementation with basic SeparateSparseDenseModel",
-            "transformer": "Hierarchical Vision Backbone with progressive mixing of inputs using attention",
-            "resnext_transformer": "Combined ResNeXt and Transformer for dense prompt extraction",
-            "backbone2": "Original implementation with separate ResNeXt and Transformer pathways",
-            "unet": "Multi-level U-Net architecture for prompt generation"
+            "sam00": "Simple Glass Prompt Generator",
+            "sam1": "Multi-Semantic Prompt Generator with CLIP features and adaptive fusion (default)",
+            "sam166e": "Alias for sam1 - Multi-Semantic Prompt Generator",
+            "samwoSE": "Multi-Semantic Prompt Generator without Semantic Elimination",
+            "samwoASFM": "Multi-Semantic Prompt Generator without Adaptive Semantic Fusion",
+            "samwoSurr": "Multi-Semantic Prompt Generator without Surrounding features",
+            "samwoASurr": "Multi-Semantic Prompt Generator - Ablation variant",
+            "samwoAST": "Multi-Semantic Prompt Generator - Ablation variant"
         }
         return modules
 

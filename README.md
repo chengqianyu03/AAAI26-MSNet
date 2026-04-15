@@ -104,6 +104,14 @@ Download and place in `checkpoints/`:
 
 ## Data Preparation
 
+MSNet estimates reflection cues **on-the-fly** inside the model via the built-in reflection estimator (e.g., LRM/CVPR2024).  
+So for dataset preparation, you only need:
+
+- input RGB images
+- ground-truth binary masks
+
+`removal_reflection` is a legacy field from earlier experiments and is **not used** in the current MSNet training/inference pipeline.
+
 ### NPZ Format
 
 Each `.npz` file contains:
@@ -120,7 +128,14 @@ Each `.npz` file contains:
 python Data/Tonpz_new.py
 ```
 
-Edit the paths at the bottom of the script to point to your image/mask/reflection directories.
+Edit the paths at the bottom of the script to point to your `image_dir`, `mask_dir`, and `output_dir`.
+
+### On-the-fly Reflection Estimation
+
+Reflection maps are generated during forward pass (no precomputed reflection map files are required). Configure the estimator with:
+
+- `--reflection_estimator` (e.g., `lrm`, `cvpr2024`)
+- `--reflection_checkpoint` (checkpoint path for the selected estimator)
 
 ### Directory Layout
 

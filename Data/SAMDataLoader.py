@@ -48,8 +48,6 @@ class SAMDataLoader(Dataset):
                 A.Resize(h, w),
             ], additional_targets={
                 'mask': 'mask',
-                'reflection_map': 'image',
-                'removal_reflection': 'image',
                 'heatmap_diff': 'mask',
             })
         else:
@@ -57,8 +55,6 @@ class SAMDataLoader(Dataset):
                 A.Resize(h, w),
             ], additional_targets={
                 'mask': 'mask',
-                'reflection_map': 'image',
-                'removal_reflection': 'image',
                 'heatmap_diff': 'mask'
             })
             
@@ -98,18 +94,7 @@ class SAMDataLoader(Dataset):
                 if 'image_embeddings' in data:
                     emb = data['image_embeddings'].copy()
 
-                # 4. Auxiliary Maps
-                if 'reflection_map' in data and data['reflection_map'] is not None:
-                     refl = data['reflection_map'][0].transpose(1, 2, 0).copy()
-                else:
-                     refl = np.zeros_like(img)
-                     
-                if 'removal_reflection' in data and data['removal_reflection'] is not None:
-                     rem = data['removal_reflection'][0].transpose(1, 2, 0).copy()
-                else:
-                     rem = np.zeros_like(img)
-
-                # 5. Heatmap
+                # 4. Heatmap
                 heat = None
                 if 'heatmap_diff' in data:
                     h_raw = data['heatmap_diff']
@@ -125,7 +110,7 @@ class SAMDataLoader(Dataset):
                             else:
                                 heat = h_raw.copy()
 
-                # 6. Metadata
+                # 5. Metadata
                 orig_shape = mask_orig.shape[:2]
                 if 'orig_height' in data and 'orig_width' in data:
                      orig_shape = (int(data['orig_height'][0]), int(data['orig_width'][0]))
@@ -140,8 +125,6 @@ class SAMDataLoader(Dataset):
                     'image': img,
                     'mask': mask_512,
                     'mask_orig': mask_orig,
-                    'reflection_map': refl,
-                    'removal_reflection': rem,
                     'heatmap_diff': heat,
                     'image_embeddings': emb,
                     'orig_shape': orig_shape,
@@ -200,11 +183,9 @@ class SAMDataLoader(Dataset):
                  lam = np.random.beta(self.mixup_alpha, self.mixup_alpha)
                  lam = max(lam, 1 - lam) # bias towards primary
 
-                 # Mix Image & Mask
+                 # Mix Image & Mask (Heatmap mixed below if available)
                  aug1['image'] = lam * aug1['image'] + (1 - lam) * aug2['image']
                  aug1['mask'] = lam * aug1['mask'] + (1 - lam) * aug2['mask']
-                 aug1['reflection_map'] = lam * aug1['reflection_map'] + (1 - lam) * aug2['reflection_map']
-                 aug1['removal_reflection'] = lam * aug1['removal_reflection'] + (1 - lam) * aug2['removal_reflection']
                  
                  # Mix Heatmap
                  if has_heat or raw2['heatmap_diff'] is not None:
@@ -226,8 +207,6 @@ class SAMDataLoader(Dataset):
         sample = {
             'data': to_tensor(aug1['image']),
             'label': to_tensor(aug1['mask']),
-            'reflection_map': to_tensor(aug1['reflection_map']),
-            'removal_reflection': to_tensor(aug1['removal_reflection']),
             'label_orig': to_tensor(mask_orig_1), # Original High-Res Mask
             'orig_shape': torch.tensor(orig_shape_1),
         }

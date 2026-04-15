@@ -183,7 +183,7 @@ class SAMDataLoader(Dataset):
                  lam = np.random.beta(self.mixup_alpha, self.mixup_alpha)
                  lam = max(lam, 1 - lam) # bias towards primary
 
-                 # Mix Image & Mask
+                 # Mix Image & Mask (Heatmap mixed below if available)
                  aug1['image'] = lam * aug1['image'] + (1 - lam) * aug2['image']
                  aug1['mask'] = lam * aug1['mask'] + (1 - lam) * aug2['mask']
                  

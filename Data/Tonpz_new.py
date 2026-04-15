@@ -32,9 +32,6 @@ class SAMDataset(Dataset):
         image_path = os.path.join(self.image_dir, image_file)
         mask_path = os.path.join(self.mask_dir, image_file.replace('.jpg', '.png'))
 
-        # Save image ID (filename without extension)
-        image_id = os.path.splitext(image_file)[0]
-
         # Load images
         mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
         img = cv2.imread(image_path)
@@ -56,8 +53,7 @@ class SAMDataset(Dataset):
         # Return sample dictionary
         sample = {
             'data': img,
-            'label': mask,
-            'image_id': image_id
+            'label': mask
         }
         
         return sample

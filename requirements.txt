@@ -1,0 +1,44 @@
+# MSNet (AAAI 2026) — Python dependencies
+# Tested with Python 3.10 / CUDA 12.x on Ubuntu 22.04.
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# NOTE on PyTorch: the line below pulls the default-CUDA wheel from PyPI.
+# If you need a specific CUDA build (e.g. cu118 / cu121), install torch first:
+#   pip install torch==2.6.0 torchvision==0.21.0 \
+#       --index-url https://download.pytorch.org/whl/cu121
+# and then run `pip install -r requirements.txt`.
+
+# ── Core deep-learning stack ────────────────────────────────────────────
+torch==2.6.0
+torchvision==0.21.0
+pytorch-lightning==1.9.5
+tensorboard>=2.15
+
+# ── SAM backbone (image-level MSNet uses the original SAM) ──────────────
+# CLIP is vendored under ./clip, so no extra install needed for it.
+segment-anything==1.0
+
+# ── Data I/O & augmentation ────────────────────────────────────────────
+numpy==1.26.4
+pandas==2.2.3
+Pillow==10.1.0
+opencv-python-headless==4.10.0.84
+albumentations==2.0.8
+scikit-image==0.25.2
+monai==1.5.0
+
+# ── Text / tokenizer utilities used by CLIP ────────────────────────────
+ftfy==6.3.1
+regex==2024.11.6
+
+# ── Misc utilities ─────────────────────────────────────────────────────
+tqdm==4.67.1
+matplotlib==3.10.3
+flatten-dict==0.4.2
+
+# ── Inference HTTP server (server.py) ──────────────────────────────────
+fastapi==0.136.0
+uvicorn==0.45.0
+python-multipart==0.0.26

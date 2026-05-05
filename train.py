@@ -48,7 +48,7 @@ def parse_args():
     refl = parser.add_argument_group('Reflection Estimator')
     refl.add_argument('--reflection_estimator', type=str, default='lrm',
                       help='Which reflection estimator to use')
-    refl.add_argument('--reflection_checkpoint', type=str, default=None)
+    refl.add_argument('--reflection_checkpoint', type=str, default='/mnt/tmp/checkpoints/model.pth')
     refl.add_argument('--reflection_checkpoint_det', type=str, default=None,
                       help='Detection checkpoint (for cvpr2024 two-stage)')
     refl.add_argument('--reflection_proc_size', type=int, default=256)
@@ -66,10 +66,14 @@ def parse_args():
 
     # ── Training ──
     train_g = parser.add_argument_group('Training')
-    train_g.add_argument('--lr', type=float, default=1e-5,
-                         help='Base learning rate (AAAI: 1e-5)')
-    train_g.add_argument('--weight_decay', type=float, default=5e-4,
-                         help='Weight decay (AAAI: 5e-4)')
+    # NOTE 20260504: changed lr default 1e-5 -> 2e-5 and weight_decay 5e-4 -> 5e-5
+    # to match the rms run_train.sh config that achieves ~0.81 IoU on GSD-S.
+    # Earlier AAAI26 defaults were too conservative (half the lr, 10x the WD),
+    # which under-trained SAM-LoRA + mask decoder.
+    train_g.add_argument('--lr', type=float, default=2e-5,
+                         help='Base learning rate (rms-aligned: 2e-5)')
+    train_g.add_argument('--weight_decay', type=float, default=5e-5,
+                         help='Weight decay (rms-aligned: 5e-5)')
     train_g.add_argument('--max_epochs', type=int, default=50)
     train_g.add_argument('--gradient_clip_val', type=float, default=1.0)
     train_g.add_argument('--accumulate_grad_batches', type=int, default=1)
@@ -153,6 +157,7 @@ if __name__ == '__main__':
         reflection_proc_size=args.reflection_proc_size,
         reflection_n_iters=args.reflection_n_iters,
         reflection_finetune=args.reflection_finetune,
+        weight_decay = args.weight_decay,
     )
 
     callbacks = [

@@ -14,40 +14,83 @@ from torch.nn.parameter import Parameter
 import torch.utils.checkpoint as cp
 
 # ==========================================
-# Part 1: SAM ViT-H LoRA
+# Part 1: SAM ViT-H LoRA — FIXED: 使用原版 _LoRA_qkv (分离 Q/V)
 # ==========================================
 
-class LoRALinear(nn.Module):
-    def __init__(self, original_linear, r, alpha=16):
+class _LoRA_qkv(nn.Module):
+    """原版 LoRA：对 fused QKV 的 Q 和 V 分别加独立的低秩 delta，K 不变。"""
+    def __init__(self, qkv, linear_a_q, linear_b_q, linear_a_v, linear_b_v):
         super().__init__()
-        self.original_linear = original_linear
-        self.scaling = alpha / r
-        self.w_a = nn.Linear(original_linear.in_features, r, bias=False)
-        self.w_b = nn.Linear(r, original_linear.out_features, bias=False)
-        nn.init.kaiming_uniform_(self.w_a.weight, a=math.sqrt(5))
-        nn.init.zeros_(self.w_b.weight)
+        self.qkv = qkv
+        self.linear_a_q = linear_a_q
+        self.linear_b_q = linear_b_q
+        self.linear_a_v = linear_a_v
+        self.linear_b_v = linear_b_v
+        self.dim = qkv.in_features
 
     def forward(self, x):
-        return self.original_linear(x) + self.w_b(self.w_a(x)) * self.scaling
+        qkv = self.qkv(x)                              # [B, N, N, 3*dim]
+        new_q = self.linear_b_q(self.linear_a_q(x))    # Q 独立 delta
+        new_v = self.linear_b_v(self.linear_a_v(x))    # V 独立 delta
+        qkv[:, :, :, :self.dim] += new_q               # 只改 Q
+        qkv[:, :, :, -self.dim:] += new_v              # 只改 V，K 不变
+        return qkv
 
 
 class LoRA_Sam(nn.Module):
-    def __init__(self, sam_model, r=4):
+    """原版 LoRA 注入：为每个 block 的 attn.qkv 创建独立的 Q/V 低秩适配器。"""
+    def __init__(self, sam_model, r=4, lora_layer=None):
         super().__init__()
-        self.sam = sam_model
-        self.lora_params = []
-        self._inject_lora(self.sam.image_encoder, r)
 
-    def _inject_lora(self, module, r):
-        for name, child in module.named_children():
-            if isinstance(child, nn.Linear) and name in ('qkv', 'q_proj', 'k_proj', 'v_proj'):
-                lora_layer = LoRALinear(child, r)
-                setattr(module, name, lora_layer)
-                self.lora_params.extend(
-                    list(lora_layer.w_a.parameters()) + list(lora_layer.w_b.parameters())
-                )
-            else:
-                self._inject_lora(child, r)
+        assert r > 0
+        if lora_layer:
+            self.lora_layer = lora_layer
+        else:
+            self.lora_layer = list(range(len(sam_model.image_encoder.blocks)))
+
+        self.w_As = nn.ModuleList()
+        self.w_Bs = nn.ModuleList()
+
+        # Freeze image encoder
+        for param in sam_model.image_encoder.parameters():
+            param.requires_grad = False
+
+        for t_layer_i, blk in enumerate(sam_model.image_encoder.blocks):
+            if t_layer_i not in self.lora_layer:
+                continue
+            w_qkv_linear = blk.attn.qkv
+            self.dim = w_qkv_linear.in_features
+            w_a_linear_q = nn.Linear(self.dim, r, bias=False)
+            w_b_linear_q = nn.Linear(r, self.dim, bias=False)
+            w_a_linear_v = nn.Linear(self.dim, r, bias=False)
+            w_b_linear_v = nn.Linear(r, self.dim, bias=False)
+            self.w_As.append(w_a_linear_q)
+            self.w_Bs.append(w_b_linear_q)
+            self.w_As.append(w_a_linear_v)
+            self.w_Bs.append(w_b_linear_v)
+            blk.attn.qkv = _LoRA_qkv(
+                w_qkv_linear,
+                w_a_linear_q, w_b_linear_q,
+                w_a_linear_v, w_b_linear_v,
+            )
+
+        self.reset_parameters()
+        self.sam = sam_model
+
+    @property
+    def lora_params(self):
+        params = []
+        for w in self.w_As:
+            params.extend(list(w.parameters()))
+        for w in self.w_Bs:
+            params.extend(list(w.parameters()))
+        return params
+
+    def reset_parameters(self):
+        for w_A in self.w_As:
+            nn.init.kaiming_uniform_(w_A.weight, a=math.sqrt(5))
+        for w_B in self.w_Bs:
+            nn.init.zeros_(w_B.weight)
 
     def forward(self, *args, **kwargs):
         return self.sam(*args, **kwargs)
@@ -74,13 +117,6 @@ class CLIPLoRAAdapter(nn.Module):
 
     def forward(self, query, key, value, key_padding_mask=None,
                 need_weights=True, attn_mask=None):
-        if not self.training:
-            return self._original_forward(
-                query, key, value,
-                key_padding_mask=key_padding_mask,
-                need_weights=need_weights,
-                attn_mask=attn_mask
-            )
         L, B, D = query.shape
         q_delta = (query.reshape(-1, D) @ self.q_lora_A @ self.q_lora_B).reshape(L, B, D)
         query_aug = query + q_delta * self.scaling
@@ -143,9 +179,6 @@ class CLIPExtractorWithLoRA(nn.Module):
 
 # ==========================================
 # Part 3: Multi-Scale Boundary Refinement
-# NOTE: This module is NOT used during AAAI training.
-# boundary_warmup_epoch=50 but max_epochs=50, so this head
-# is never activated. Kept here for completeness only.
 # ==========================================
 
 class MultiScaleBoundaryRefinementHead(nn.Module):
@@ -171,9 +204,24 @@ class MultiScaleBoundaryRefinementHead(nn.Module):
         nn.init.zeros_(self.refine_conv[-1].weight)
         nn.init.zeros_(self.refine_conv[-1].bias)
 
-    def forward(self, coarse_logits_512, fpn0_feat, fpn1_feat, target_size):
+    def forward(self, coarse_logits_512, fpn0_feat=None, fpn1_feat=None, target_size=None):
+        if target_size is None:
+            target_size = coarse_logits_512.shape[-2:]
         coarse_up = F.interpolate(coarse_logits_512, size=target_size,
                                    mode='bilinear', align_corners=False)
+
+        if fpn0_feat is None or fpn1_feat is None:
+            context = torch.zeros(
+                coarse_up.shape[0],
+                self.refine_conv[0].in_channels - 1,
+                coarse_up.shape[2],
+                coarse_up.shape[3],
+                device=coarse_up.device,
+                dtype=coarse_up.dtype,
+            )
+            residual = self.refine_conv(torch.cat([coarse_up, context], dim=1))
+            return coarse_up + 0.1 * residual
+
         fpn0_up = F.interpolate(fpn0_feat, size=target_size, mode='bilinear', align_corners=False)
         fpn1_up = F.interpolate(fpn1_feat, size=target_size, mode='bilinear', align_corners=False)
         fpn_cat = torch.cat([fpn0_up, fpn1_up], dim=1)
@@ -269,13 +317,17 @@ class AAAI_FusionModule(nn.Module):
 
 
 # ==========================================
-# Part 5: Prompt Generator
+# Part 5: Prompt Generator — FIXED: 接收 SAM 默认 embeddings
 # ==========================================
 
 class AdvancedAAAI_PromptGenerator(nn.Module):
     def __init__(self, num_points=20, d_model=256, sam_dim=256,
                  clip_model_name="ViT-B/16", clip_lora_rank=64,
                  clip_lora_alpha=128, clip_layer_idx=10):
+        # NOTE 20260504: switched default from 'CS-ViT-B/16' (CLIP-Surgery)
+        # to standard 'ViT-B/16' to match the rms repo configuration
+        # which reaches ~0.81 IoU on GSD-S. CLIP-Surgery has different attention
+        # behavior; rms's MultiSemanticPromptGenerator was tuned for vanilla CLIP.
         super().__init__()
         self.num_points = num_points
         self.d_model = d_model
@@ -331,7 +383,24 @@ class AdvancedAAAI_PromptGenerator(nn.Module):
             return cp.checkpoint(self._extract_clip_feat, img, use_reentrant=False)
         return self._extract_clip_feat(img)
 
-    def forward(self, images, reflection_map, sam_features):
+    def forward(self, image_embeddings, images, reflection_map, sam_features,
+                sparse_embeddings2=None, dense_embeddings2=None):
+        """
+        FIXED: 接口匹配原版 AAAI prompt module。
+        
+        Args:
+            image_embeddings: SAM 图像嵌入 [B, C, H, W]（用于确定 dense 输出尺寸）
+            images: 原始 RGB 图像 [B, 3, 1024, 1024]
+            reflection_map: 反射图 [B, 3, H, W] 或 None
+            sam_features: SAM 嵌入特征 [B, C, H, W]（送入 fusion module）
+            sparse_embeddings2: SAM prompt_encoder 默认稀疏嵌入（保留 API 兼容性）
+            dense_embeddings2: SAM prompt_encoder 默认密集嵌入（保留 API 兼容性）
+        
+        Returns:
+            sparse: [B, num_points, d_model]
+            dense: [B, d_model, H_pe, W_pe] 尺寸匹配 image_embeddings
+            weights_log: dict
+        """
         rgb_feat = self.extract_clip_feat(images)
         if reflection_map is not None:
             refl_feat = self.extract_clip_feat(reflection_map)
@@ -347,15 +416,16 @@ class AdvancedAAAI_PromptGenerator(nn.Module):
         sparse_flat = sparse_features.flatten(start_dim=1)
         sparse = self.fc(sparse_flat).view(-1, self.num_points, self.d_model)
         dense = self.dense_head(enhanced)
-        if dense.shape[-1] != 64:
-            dense = F.interpolate(dense, size=(64, 64), mode='bilinear', align_corners=False)
+        # FIXED: 动态匹配 image_embeddings 的空间尺寸，而不是硬编码 64
+        target_dense_size = image_embeddings.shape[2:]  # e.g. (64, 64) for SAM ViT-H
+        if dense.shape[2:] != target_dense_size:
+            dense = F.interpolate(dense, size=target_dense_size,
+                                  mode='bilinear', align_corners=False)
         return sparse, dense, weights_log
 
 
 # ==========================================
-# Part 6: BaselineSAMModel (AAAI MSNet)
-# Uses original SAM ViT-H backbone with LoRA,
-# integrates LRM reflection module end-to-end.
+# Part 6: BaselineSAMModel
 # ==========================================
 
 class BaselineSAMModel(BaseModel):
@@ -373,13 +443,14 @@ class BaselineSAMModel(BaseModel):
         ft_dec=True,
         reflection_estimator_name="lrm",
         reflection_estimator_kwargs=None,
-        reflection_checkpoint=None,
+        reflection_checkpoint="/mnt/tmp/checkpoints/model.pth",
         reflection_proc_size=256,
         reflection_n_iters=3,
         reflection_finetune=False,
+        weight_decay=5e-5,
         **kwargs
     ):
-        super().__init__(in_channels=3, out_channels=1, lr=lr, weight_decay=1e-4)
+        super().__init__(in_channels=3, out_channels=1, lr=lr, weight_decay=weight_decay)
         self.save_hyperparameters()
         self.validation_step_outputs = []
         self.multi_scale_weight = multi_scale_weight
@@ -391,6 +462,7 @@ class BaselineSAMModel(BaseModel):
         for param in sam_model.parameters():
             param.requires_grad = False
 
+        # FIXED: 使用原版 _LoRA_qkv 的 LoRA_Sam（分离 Q/V delta）
         self.sam_backbone = LoRA_Sam(sam_model, r=lora_rank)
 
         if ft_dec:
@@ -403,7 +475,7 @@ class BaselineSAMModel(BaseModel):
         sam_embed_dim = self.sam_backbone.sam.image_encoder.neck[-2].out_channels
         print(f"SAM image encoder output dim: {sam_embed_dim}")
 
-        # --- Reflection Estimator (end-to-end integrated, like VideoModel) ---
+        # --- Reflection Estimator ---
         self.reflection_estimator = self._build_reflection_estimator(
             name=reflection_estimator_name,
             explicit_kwargs=reflection_estimator_kwargs,
@@ -422,24 +494,29 @@ class BaselineSAMModel(BaseModel):
         )
 
         # --- Multi-Scale Boundary Refinement ---
-        # NOTE: This module is NOT used during AAAI training.
-        # boundary_warmup_epoch=50 but max_epochs=50, so the boundary
-        # refinement head is never activated. Kept for completeness.
         self.boundary_head = MultiScaleBoundaryRefinementHead(
             fpn0_dim=32,
             fpn1_dim=64,
             hidden_dim=64
         )
 
-        self.loss_fn = CombinedBCEDiceFocalLoss()
+        # NOTE 20260505: align loss weights with rms (which reaches ~0.81 IoU on GSD-S).
+        # rms uses bce=1, dice=1, focal=0.5, focal_alpha=0.5; AAAI26 previously
+        # used the defaults (focal=1.0, focal_alpha=0.25) which over-weighted the
+        # focal term and biased toward foreground hard pixels at the cost of IoU.
+        self.loss_fn = CombinedBCEDiceFocalLoss(
+            bce_weight=1.0,
+            dice_weight=1.0,
+            focal_weight=0.5,
+            focal_gamma=2.0,
+            focal_alpha=0.5,
+        )
 
         # --- Collect trainable params ---
         self.trainable_params = self.sam_backbone.lora_params.copy()
         if ft_dec:
             self.trainable_params += list(self.sam_backbone.sam.mask_decoder.parameters())
         self.trainable_params += list(self.prompt_gen.parameters())
-        # NOTE: boundary_head params are registered but never trained
-        # because boundary refinement is never activated (see above).
         self.trainable_params += list(self.boundary_head.parameters())
         self.trainable_params += [p for p in self.reflection_estimator.parameters() if p.requires_grad]
 
@@ -451,10 +528,10 @@ class BaselineSAMModel(BaseModel):
         refl_train = sum(p.numel() for p in self.reflection_estimator.parameters() if p.requires_grad)
         est_name = getattr(self.reflection_estimator, '_registry_name', type(self.reflection_estimator).__name__)
 
-        print(f"\nModel Ready: SAM ViT-H + LoRA + CLIP-LoRA(MHA-level) + AAAI Fusion")
+        print(f"\nModel Ready: SAM ViT-H + LoRA(_LoRA_qkv) + CLIP-LoRA(MHA-level) + AAAI Fusion")
         print(f"  Total trainable params: {total_trainable:,}")
         print(f"  CLIP LoRA params: {clip_lora_params:,}")
-        print(f"  Boundary head params: {boundary_params:,} (NOT used, warmup={boundary_warmup_epoch})")
+        print(f"  Boundary head params: {boundary_params:,} (warmup={boundary_warmup_epoch}, zero-context fallback)")
         print(f"  Reflection estimator: '{est_name}' (trainable: {refl_train:,})")
         print(f"  ft_dec: {ft_dec}")
 
@@ -497,17 +574,22 @@ class BaselineSAMModel(BaseModel):
 
         reflection_map, transmission_map, refl_extras = self._estimate_reflection(images)
 
-        sparse, dense, weights_log = self.prompt_gen(images, reflection_map, img_embeds)
+        # FIXED: 获取 SAM 默认 prompt embeddings 并传给 prompt_gen
+        sparse_embeddings2, dense_embeddings2 = self.sam_backbone.sam.prompt_encoder(
+            points=None, boxes=None, masks=None
+        )
+
+        sparse, dense, weights_log = self.prompt_gen(
+            img_embeds, images, reflection_map, img_embeds,
+            sparse_embeddings2=sparse_embeddings2,
+            dense_embeddings2=dense_embeddings2
+        )
 
         if self.training and hasattr(self, 'log'):
             for wname, wval in weights_log.items():
                 self.log(f'fusion/{wname}', wval, on_step=False, on_epoch=True)
 
-        sparse_embeddings, dense_embeddings = self.sam_backbone.sam.prompt_encoder(
-            points=None, boxes=None, masks=None
-        )
-
-        low_res_masks, _, = self.sam_backbone.sam.mask_decoder(
+        low_res_masks, _ = self.sam_backbone.sam.mask_decoder(
             image_embeddings=img_embeds,
             image_pe=self.sam_backbone.sam.prompt_encoder.get_dense_pe(),
             sparse_prompt_embeddings=sparse,
@@ -521,11 +603,26 @@ class BaselineSAMModel(BaseModel):
         low_res_masks = self._encode_and_decode(batch)
         coarse_512 = F.interpolate(low_res_masks, size=(512, 512),
                                     mode='bilinear', align_corners=False)
+        refined = coarse_512
+        target_size = None
+        if 'label_orig' in batch:
+            target_size = batch['label_orig'].shape[-2:]
+        elif 'orig_shape' in batch:
+            orig_shape = batch['orig_shape']
+            if isinstance(orig_shape, torch.Tensor):
+                target_shape = orig_shape[0] if orig_shape.dim() > 1 else orig_shape
+                target_size = tuple(int(v) for v in target_shape.detach().cpu().tolist())
+            else:
+                target_size = tuple(int(v) for v in orig_shape[0])
+
+        if target_size is not None and tuple(target_size) != tuple(coarse_512.shape[-2:]):
+            refined = self.boundary_head(coarse_512, target_size=target_size)
+
         return {
             'coarse': coarse_512,
-            'refined': coarse_512,
+            'refined': refined,
             'stage_one': coarse_512,
-            'stage_two': coarse_512,
+            'stage_two': refined,
         }
 
     def training_step(self, batch, batch_idx):
@@ -536,8 +633,6 @@ class BaselineSAMModel(BaseModel):
         gt_512 = batch['label'].squeeze(1)
         loss_coarse = self.loss_fn(coarse_512, gt_512)
 
-        # NOTE: Boundary refinement is never activated because
-        # boundary_warmup_epoch=50 >= max_epochs=50. Only coarse loss is used.
         loss_refined = torch.tensor(0.0, device=coarse_512.device)
         use_boundary = (self.current_epoch >= self.boundary_warmup_epoch)
 
@@ -546,7 +641,7 @@ class BaselineSAMModel(BaseModel):
             target_h, target_w = gt_orig.shape[-2], gt_orig.shape[-1]
             if (target_h, target_w) != (512, 512):
                 refined = self.boundary_head(
-                    coarse_512.detach(), None, None, (target_h, target_w)
+                    coarse_512.detach(), target_size=(target_h, target_w)
                 )
                 loss_refined = self.loss_fn(refined, gt_orig)
 
@@ -566,12 +661,15 @@ class BaselineSAMModel(BaseModel):
         loss = self.loss_fn(outputs['coarse'], gt_512)
 
         gt_orig = batch.get('label_orig', batch['label']).squeeze(1)
-
-        pred_bin = (torch.sigmoid(outputs['coarse']) > 0.5).float().squeeze(1)
         gt_flat = gt_orig.squeeze(1) if gt_orig.dim() > 2 else gt_orig
-        if pred_bin.shape[-2:] != gt_flat.shape[-2:]:
-            pred_bin = F.interpolate(pred_bin.unsqueeze(1), size=gt_flat.shape[-2:],
-                                      mode='nearest').squeeze(1)
+
+        # FIXED: 先 bilinear 上采样 logits，再 sigmoid 二值化
+        logits = outputs.get('refined', outputs['coarse'])
+        if logits.shape[-2:] != gt_flat.shape[-2:]:
+            logits = F.interpolate(logits, size=gt_flat.shape[-2:],
+                                   mode='bilinear', align_corners=False)
+        pred_bin = (torch.sigmoid(logits) > 0.5).float().squeeze(1)
+
         intersection = (pred_bin * gt_flat).sum()
         union = pred_bin.sum() + gt_flat.sum() - intersection
         iou = (intersection + 1e-6) / (union + 1e-6)
@@ -593,32 +691,41 @@ class BaselineSAMModel(BaseModel):
         boundary_params = list(self.boundary_head.parameters())
         refl_params = [p for p in self.reflection_estimator.parameters() if p.requires_grad]
 
+        # NOTE 20260504: rms uses a single param group at base lr.
+        # Previously decoder was at 0.5x and boundary at 2.0x; this slowed the
+        # SAM mask decoder (the most important trainable head) and over-trained
+        # an essentially-untrained boundary head. Align to rms (all at base lr,
+        # except keep reflection estimator down-weighted since it is a frozen
+        # pretrained network when finetuned).
         param_groups = [
             {'params': sam_lora_params, 'lr': self.learning_rate, 'name': 'sam_lora'},
         ]
         if decoder_params:
             param_groups.append(
-                {'params': decoder_params, 'lr': self.learning_rate * 0.5, 'name': 'sam_decoder'}
+                {'params': decoder_params, 'lr': self.learning_rate, 'name': 'sam_decoder'}
             )
         param_groups.append(
-            {'params': prompt_params, 'lr': self.learning_rate * 1.0, 'name': 'prompt_gen'}
+            {'params': prompt_params, 'lr': self.learning_rate, 'name': 'prompt_gen'}
         )
-        # NOTE: boundary_head params are included but never activated
         param_groups.append(
-            {'params': boundary_params, 'lr': self.learning_rate * 2.0, 'name': 'boundary'}
+            {'params': boundary_params, 'lr': self.learning_rate, 'name': 'boundary'}
         )
         if refl_params:
             param_groups.append(
                 {'params': refl_params, 'lr': self.learning_rate * 0.1, 'name': 'reflection_estimator'}
             )
 
-        optimizer = optim.AdamW(param_groups, weight_decay=1e-4)
+        optimizer = optim.AdamW(param_groups, weight_decay=self.weight_decay)
 
+        # NOTE 20260505: cosine min factor 0.01 -> 0.05 to match rms.
+        # With base_lr=2e-5, the previous floor was 2e-7 (effectively frozen in
+        # the last epochs); rms's 0.05 floor keeps lr at 1e-6 so SAM-LoRA / mask
+        # decoder can keep refining. 5x more effective lr in the tail.
         def lr_lambda(epoch):
             if epoch < 3:
                 return 0.1 + 0.9 * (epoch / 3.0)
             progress = (epoch - 3) / max(1, 50 - 3)
-            return max(0.01, 0.5 * (1.0 + math.cos(math.pi * min(1.0, progress))))
+            return max(0.05, 0.5 * (1.0 + math.cos(math.pi * min(1.0, progress))))
 
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
         return [optimizer], [{"scheduler": scheduler, "interval": "epoch"}]

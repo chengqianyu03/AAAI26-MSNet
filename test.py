@@ -40,7 +40,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='AAAI MSNet Evaluation (SAM ViT-H)')
 
     parser.add_argument('--data_dir', type=str, default="/mnt/tmp/Onpzs_gsd_t")
-    parser.add_argument('--checkpoint_path', type=str, default="/mnt/tmp/AAAIFinalT/MSNet/msnet-sam-epoch=02-val/iou=0.6947.ckpt")
+    parser.add_argument('--checkpoint_path', type=str, required=True, help='Path to the model checkpoint (e.g., .ckpt file)')
     parser.add_argument('--output_dir', type=str, default='AAAI26/evaluation_results')
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--batch_size', type=int, default=1)
@@ -88,7 +88,7 @@ def evaluate(args):
 
             outputs = model(batch)
 
-            logits = outputs['coarse']
+            logits = outputs.get('refined', outputs.get('stage_two', outputs['coarse']))
             gt = batch.get('label_orig', batch['label']).cpu().numpy().squeeze()
 
             probs = torch.sigmoid(logits).cpu().numpy().squeeze()

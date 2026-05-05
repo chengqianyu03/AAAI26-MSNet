@@ -36,12 +36,16 @@ class SimpleDermoscopicDataModule(pl.LightningDataModule):
             # Training Dataset: Enable MixUp and Augmentations
             # cache_mode='full' loads all data to RAM. 
             # If you run out of memory, change to 'part' or 'none'.
+            # NOTE 20260504: aligned mixup_prob 0.5 -> 1.0 to match rms default
+            # (rms's SAMDataLoader defaults to mixup_prob=1.0). Rms applies
+            # mixup to every training sample, with lam=max(lam,1-lam) biasing
+            # toward the primary sample.
             self.train_dataset = SAMDataLoader(
                 self.train_dir,
                 is_train=True,
                 seed=self.seed,
                 enable_mixup=True,
-                mixup_prob=0.5,
+                mixup_prob=1.0,
             )
             
             # Validation Dataset: No Augmentations

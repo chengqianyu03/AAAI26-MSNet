@@ -64,10 +64,12 @@ def save_results(img_orig, pred_prob, pred_binary, output_dir, name):
 
 def parse_args():
     p = argparse.ArgumentParser(description='AAAI MSNet Inference (SAM ViT-H)')
-    p.add_argument('--input_image', type=str, default="AAAI26/TestImg/0c589847582145febe410715c1cf3866_1_1.jpg")
-    p.add_argument('--checkpoint_path', type=str, default="/mnt/tmp/AAAIFinalT/MSNet/msnet-sam-epoch=02-val/iou=0.6947.ckpt")
+    p.add_argument('--input_image', type=str, default="AAAI26/TestImg/95ed3544c2da3a923eba77ac74478ef.jpg")
+    p.add_argument('--checkpoint_path', type=str, default="/mnt/tmp/AAAIFinalT/MSNet/msnet-sam-epoch=08-val/iou=0.7991.ckpt")
+    #/mnt/tmp/AAAIFinalT/MSNet/msnet-sam-epoch=08-val/iou=0.7991.ckpt
+    #/mnt/tmp/AAAIFinalT/MSNet/msnet-sam-epoch=13-val/iou=0.7974.ckpt
     p.add_argument('--output_dir', type=str, default='AAAI26/inference_results')
-    p.add_argument('--threshold', type=float, default=0.5)
+    p.add_argument('--threshold', type=float, default=0.2)
     p.add_argument('--gpu', type=int, default=0)
     p.add_argument('--image_size', type=int, default=512)
     return p.parse_args()
